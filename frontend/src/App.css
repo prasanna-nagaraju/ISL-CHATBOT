@@ -1,0 +1,61 @@
+/* App.css — Global design system
+   Palette: Warm cream background + Saffron accent (Indian tricolor inspired)
+   Fonts: Nunito (display) + JetBrains Mono (data) + Lato (body)
+*/
+
+@import url('https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800;900&family=JetBrains+Mono:wght@400;500&family=Lato:wght@300;400;700&display=swap');
+
+/* ── CSS Variables ──────────────────────────────────────── */
+:root {
+  /* Backgrounds */
+  --bg-main:    #faf8f5;
+  --panel-bg:   #f5f2ed;
+  --card-bg:    #ffffff;
+  --input-bg:   #f5f2ed;
+  --video-bg:   #1a1a1a;
+  --section-alt: #f0ece4;
+  --hover-bg:   #ede9e1;
+
+  /* Saffron accent (Indian flag saffron #FF9933) */
+  --saffron:        #f07c0a;
+  --saffron-dim:    rgba(240, 124, 10, 0.08);
+  --saffron-border: rgba(240, 124, 10, 0.25);
+
+  /* Text */
+  --text-primary:   #1a1410;
+  --text-secondary: #5c5248;
+  --text-muted:     #9c9088;
+
+  /* Borders */
+  --border-dim:  rgba(0, 0, 0, 0.08);
+  --border-soft: rgba(0, 0, 0, 0.14);
+
+  /* Fonts */
+  --font-display: 'Nunito', sans-serif;
+  --font-mono:    'JetBrains Mono', monospace;
+  --font-body:    'Lato', sans-serif;
+}
+
+/* ── Reset ──────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html { font-size: 16px; scroll-behavior: smooth; }
+
+body {
+  font-family: var(--font-body);
+  font-weight: 400;
+  line-height: 1.6;
+  background: var(--bg-main);
+  color: var(--text-primary);
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+}
+
+.app {
+  min-height: 100vh;
+}
+
+/* ── Selection ───────────────────────────────────────────── */
+::selection {
+  background: rgba(240, 124, 10, 0.2);
+  color: var(--text-primary);
+}
