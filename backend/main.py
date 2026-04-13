@@ -1,8 +1,3 @@
-"""
-main.py — ISL Sign Language Chatbot Backend
-=============================================
-Clean, production-ready FastAPI backend with Cohere API.
-"""
 
 import io
 import os
@@ -15,12 +10,15 @@ import tempfile
 import time
 import json
 import uuid
+import warnings
 from pathlib import Path
 from typing import List, Optional, Dict
 from contextlib import asynccontextmanager
 from collections import deque
 from datetime import datetime
 from dotenv import load_dotenv
+
+warnings.filterwarnings("ignore", category=UserWarning)
 load_dotenv()  
 
 import numpy as np
@@ -43,34 +41,75 @@ _session_stats = {
     "label_counts": {}
 }
 _model: Optional[tf.keras.Model] = None
+_landmark_model: Optional[tf.keras.Model] = None
 _class_names: Optional[List[str]] = None
 _config: Optional[Dict] = None
+_model_load_error: Optional[str] = None
+
+
+class PatchedInputLayer(tf.keras.layers.InputLayer):
+    """
+    Compatibility shim for older TensorFlow/Keras versions.
+
+    Some models saved with newer Keras include `optional` and `batch_shape`
+    keys in the InputLayer config, which older deserializers may not accept.
+    """
+
+    def __init__(
+        self,
+        input_shape=None,
+        batch_shape=None,
+        optional=None,  # newer Keras keyword; ignored for inference
+        **kwargs,
+    ):
+        # Convert `batch_shape=[None, H, W, C]` -> input_shape=(H,W,C)
+        if input_shape is None and batch_shape is not None:
+            try:
+                input_shape = tuple(batch_shape[1:])
+            except Exception:
+                pass
+
+        # Strip newer/unrecognized keys before delegating.
+        kwargs.pop("batch_shape", None)
+        kwargs.pop("optional", None)
+
+        super().__init__(input_shape=input_shape, **kwargs)
 
 
 # ─── Lifespan ─────────────────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _model, _class_names, _config
+    global _model, _landmark_model, _class_names, _config, _model_load_error
 
     print("[Backend] Starting up...")
-    model_dir   = os.getenv("MODEL_DIR",   "model_v1")
-    labels_path = os.getenv("LABELS_PATH", "labels.npy")
-    config_path = os.getenv("CONFIG_PATH", "training_config.json")
+    base_dir = Path(__file__).resolve().parent
+    model_dir = (base_dir / os.getenv("MODEL_DIR", "model_v1")).resolve()
+    labels_path = (base_dir / os.getenv("LABELS_PATH", "labels.npy")).resolve()
+    config_path = (base_dir / os.getenv("CONFIG_PATH", "training_config.json")).resolve()
+
+    _model_load_error = None
 
     # Load model
     try:
-        keras_path = os.path.join(model_dir, "model.keras")
-        best_path  = os.path.join(model_dir, "best.keras")
-
-        if os.path.exists(keras_path):
-            load_path = keras_path
-        elif os.path.exists(best_path):
-            load_path = best_path
-        else:
-            load_path = model_dir
+        # Support both `.keras` and `.h5` exports.
+        # Priority: best.* then model.*; otherwise fall back to a single file if present.
+        # Prefer `.h5` first (your latest model change), then fall back to `.keras`.
+        candidates = [
+            model_dir / "best.h5",
+            model_dir / "model.h5",
+            model_dir / "best.keras",
+            model_dir / "model.keras",
+        ]
+        load_path = next((p for p in candidates if p.exists()), None)
+        if load_path is None:
+            h5_files = sorted(model_dir.glob("*.h5"))
+            keras_files = sorted(model_dir.glob("*.keras"))
+            all_files = keras_files + h5_files
+            load_path = all_files[0] if len(all_files) == 1 else model_dir
 
         print(f"[Backend] Loading model from: {load_path}")
-        _model = tf.keras.models.load_model(load_path, compile=False)
+        # 1) Normal load first
+        _model = tf.keras.models.load_model(str(load_path), compile=False)
         _model.trainable = False
 
         # Warm-up pass
@@ -79,13 +118,46 @@ async def lifespan(app: FastAPI):
         print("[Backend] Model loaded and warmed up.")
 
     except Exception as e:
-        print(f"[Backend] WARNING: Model load failed: {e}")
-        print("[Backend] Running in demo mode.")
+        # 2) Retry with compatibility shim
+        # Your reported failure is a config kwarg mismatch on InputLayer.
+        try:
+            _model = tf.keras.models.load_model(
+                str(load_path),
+                compile=False,
+                safe_mode=False,
+                custom_objects={"InputLayer": PatchedInputLayer},
+            )
+            _model.trainable = False
+
+            dummy = np.zeros((1, 224, 224, 3), dtype=np.float32)
+            _model.predict(dummy, verbose=0)
+            _model_load_error = None
+            print("[Backend] Model loaded and warmed up (after retry).")
+        except Exception as e2:
+            _model = None
+            _model_load_error = f"{type(e2).__name__}: {e2}"
+            print(f"[Backend] WARNING: Image model load failed: {_model_load_error}")
+
+    # Load landmark model (Stage A)
+    landmark_model_path = base_dir / "landmark_model.keras"
+    if landmark_model_path.exists():
+        try:
+            _landmark_model = tf.keras.models.load_model(str(landmark_model_path), compile=False)
+            _landmark_model.trainable = False
+            dummy = np.zeros((1, 63), dtype=np.float32)
+            _landmark_model.predict(dummy, verbose=0)
+            print("[Backend] Landmark model loaded and warmed up.")
+        except Exception as e:
+            print(f"[Backend] WARNING: Landmark model load failed: {e}")
+    else:
+        print("[Backend] Landmark model not found yet (waiting for training).")
 
     # Load labels
     try:
-        _class_names = np.load(labels_path, allow_pickle=True).tolist()
-        print(f"[Backend] Labels: {len(_class_names)} classes → {_class_names}")
+        _class_names = np.load(str(labels_path), allow_pickle=True).tolist()
+        # Avoid non-ASCII characters in logs (some Windows consoles may choke),
+        # which would otherwise trigger the fallback to default labels.
+        print(f"[Backend] Labels loaded: {len(_class_names)} classes")
     except Exception as e:
         _class_names = [str(i) for i in range(10)] + \
                        [chr(c) for c in range(ord('A'), ord('Z') + 1)]
@@ -93,7 +165,7 @@ async def lifespan(app: FastAPI):
 
     # Load config
     try:
-        with open(config_path) as f:
+        with open(config_path, "r", encoding="utf-8") as f:
             _config = json.load(f)
     except:
         _config = {"backbone": "mobilenetv2", "confidence_threshold": 0.60}
@@ -123,6 +195,11 @@ app.add_middleware(
 class Base64PredictRequest(BaseModel):
     image: str
     confidence_threshold: float = 0.60
+
+
+class LandmarksPredictRequest(BaseModel):
+    landmarks: List[float] = Field(..., description="63 normalized landmark floats")
+    confidence_threshold: float = 0.85
 
 
 class ChatMessage(BaseModel):
@@ -206,6 +283,56 @@ def _run_inference(image_bgr: np.ndarray, confidence_threshold: float = 0.60) ->
     return result
 
 
+def _run_landmark_inference(features: List[float], confidence_threshold: float = 0.60) -> Dict:
+    import random
+    if _landmark_model is None:
+        # Demo mode if model not built yet
+        label = random.choice(_class_names or ["A"])
+        conf  = random.uniform(0.65, 0.99)
+        return {
+            "label": label, "confidence": round(conf, 4),
+            "top3": [[label, round(conf, 4)]],
+            "latency_ms": 1.0, "above_threshold": True,
+            "raw_predicted_label": label,
+            "prediction_id": str(uuid.uuid4())[:8],
+            "timestamp": datetime.now().isoformat(),
+            "source": "demo_landmarks"
+        }
+
+    # Input format: (1, 63)
+    input_data = np.array(features, dtype=np.float32).reshape(1, -1)
+    
+    t0 = time.perf_counter()
+    probs = _landmark_model.predict(input_data, verbose=0)[0]
+    ms = (time.perf_counter() - t0) * 1000
+
+    idx = int(np.argmax(probs))
+    conf = float(probs[idx])
+    top3 = [[_class_names[i], round(float(probs[i]), 4)]
+             for i in np.argsort(probs)[::-1][:3]]
+    
+    above = conf >= confidence_threshold
+    label = _class_names[idx] if above else "UNCERTAIN"
+
+    _session_stats["total_predictions"] += 1
+    if above:
+        _session_stats["confident_predictions"] += 1
+        _session_stats["label_counts"][_class_names[idx]] = \
+            _session_stats["label_counts"].get(_class_names[idx], 0) + 1
+
+    result = {
+        "label": label, "confidence": round(conf, 4),
+        "top3": top3, "latency_ms": round(ms, 2),
+        "above_threshold": above,
+        "raw_predicted_label": _class_names[idx],
+        "prediction_id": str(uuid.uuid4())[:8],
+        "timestamp": datetime.now().isoformat(),
+        "source": "landmarks"
+    }
+    _prediction_history.append(result)
+    return result
+
+
 # ─── Endpoints ────────────────────────────────────────────────────────────────
 
 @app.get("/health")
@@ -214,6 +341,7 @@ async def health():
         "status": "ok",
         "model_loaded": _model is not None,
         "num_classes": len(_class_names) if _class_names else 0,
+        "model_load_error": _model_load_error,
         "session_stats": _session_stats
     }
 
@@ -250,6 +378,18 @@ async def predict_base64(payload: Base64PredictRequest):
     except Exception as e:
         raise HTTPException(400, f"Base64 error: {e}")
     return _run_inference(img, payload.confidence_threshold)
+
+
+@app.post("/predict/landmarks")
+async def predict_landmarks(payload: LandmarksPredictRequest):
+    """
+    Inference endpoint using extracted MediaPipe hand landmarks.
+    Expects exactly 63 floats (21 landmarks * 3 coords).
+    """
+    if len(payload.landmarks) != 63:
+        raise HTTPException(400, f"Expected 63 floats, got {len(payload.landmarks)}")
+    
+    return _run_landmark_inference(payload.landmarks, payload.confidence_threshold)
 
 
 @app.post("/chat")
@@ -380,11 +520,15 @@ async def tts(request: TTSRequest):
             engine = pyttsx3.init()
             engine.setProperty("rate", rate)
             engine.setProperty("volume", volume)
-            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
-            engine.save_to_file(text, tmp.name)
+            
+            fd, path = tempfile.mkstemp(suffix=".wav")
+            os.close(fd) # Crucial: close the handle so Windows allows pyttsx3 to write
+            
+            engine.save_to_file(text, path)
             engine.runAndWait()
             engine.stop()
-            return tmp.name
+            
+            return path
 
         path = await loop.run_in_executor(
             None, _synth, request.text, request.rate, request.volume

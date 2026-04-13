@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: isl-signbot-backend
+    env: docker
+    dockerfilePath: ./Dockerfile
+    repo: https://github.com/yourusername/signbot  # Update after GitHub push
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.10
+      - key: COHERE_API_KEY
+        sync: false  # User sets manually in Render dashboard
+    healthCheckPath: /health
+    envURLPath: /health
+

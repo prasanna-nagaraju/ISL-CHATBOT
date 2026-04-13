@@ -1,8 +1,9 @@
 // ISLChatbot.jsx
 // Merged recognizer + chatbot interface
-// Recognized signs → directly sent to Gemini AI
+// Recognized signs → directly sent to Cohere AI
 
 import { useState, useEffect, useRef, useCallback } from "react";
+import { HandLandmarker, FilesetResolver } from "@mediapipe/tasks-vision";
 import "./ISLChatbot.css";
 
 const API = import.meta.env.VITE_API_URL || "http://localhost:8000";
@@ -26,7 +27,6 @@ const INFERENCE_MS = 600;
 export default function ISLChatbot({ onBack }) {
   // Camera
   const videoRef   = useRef(null);
-  const canvasRef  = useRef(null);
   const streamRef  = useRef(null);
   const intervalRef = useRef(null);
   const audioRef   = useRef(null);
@@ -40,6 +40,12 @@ export default function ISLChatbot({ onBack }) {
   const [signedText,  setSignedText]      = useState("");
   const lastSignRef = useRef({ label: null, count: 0 });
 
+  // MediaPipe Tasks Vision HandLandmarker (same model as Python training)
+  const landmarkerRef = useRef(null);
+  const [isHandPresent, setIsHandPresent] = useState(false);
+
+  const inferenceInFlightRef = useRef(false);
+
   // Chat
   const [messages,  setMessages]  = useState([
     {
@@ -49,6 +55,7 @@ export default function ISLChatbot({ onBack }) {
     }
   ]);
   const [isThinking, setIsThinking] = useState(false);
+  const [confidenceThreshold, setConfidenceThreshold] = useState(85);
   const chatEndRef = useRef(null);
 
   // Translation + TTS
@@ -62,6 +69,38 @@ export default function ISLChatbot({ onBack }) {
   }, [messages, isThinking]);
 
   // ── Camera ────────────────────────────────────────────────────────
+
+  // ── Initialize MediaPipe Tasks Vision HandLandmarker ────────────────
+  // This uses the EXACT SAME model as Python's mp.tasks.vision.HandLandmarker
+  // so landmarks are guaranteed to match what the classifier was trained on.
+  useEffect(() => {
+    let cancelled = false;
+    async function initLandmarker() {
+      try {
+        const vision = await FilesetResolver.forVisionTasks(
+          "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm"
+        );
+        const lm = await HandLandmarker.createFromOptions(vision, {
+          baseOptions: {
+            modelAssetPath: "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
+            delegate: "GPU"
+          },
+          runningMode: "VIDEO",
+          numHands: 1,
+          minHandDetectionConfidence: 0.5,
+          minHandPresenceConfidence: 0.5
+        });
+        if (!cancelled) {
+          landmarkerRef.current = lm;
+          console.log("[ISL] HandLandmarker (Tasks Vision) initialized.");
+        }
+      } catch (e) {
+        console.error("[ISL] HandLandmarker init failed:", e);
+      }
+    }
+    initLandmarker();
+    return () => { cancelled = true; };
+  }, []);
 
   const startCamera = async () => {
     setCamError(null);
@@ -86,40 +125,98 @@ export default function ISLChatbot({ onBack }) {
     if (videoRef.current) videoRef.current.srcObject = null;
     setIsCamOn(false);
     setCurrentSign(null);
+    setIsHandPresent(false);
   };
 
-  // ── Recognition loop ──────────────────────────────────────────────
+  // ── Recognition loop (Tasks Vision Landmarks) ──────────────────────
 
-  const captureFrame = useCallback(() => {
-    const v = videoRef.current, c = canvasRef.current;
-    if (!v || !c || v.readyState < 2) return null;
+  // Normalize landmarks exactly how Python train_landmarks.py does
+  const normalizeLandmarks = useCallback((landmarks) => {
+    // landmarks is an array of {x, y, z} from @mediapipe/tasks-vision
+    // This is IDENTICAL format to Python's mp.tasks.vision output
+    const wrist = landmarks[0];
 
-    // Crop center square — user's hand should be in the center of the frame.
-    // This matches typical training dataset format (hand-only, cropped images).
-    // The crop size is 70% of the smaller dimension for a generous hand region.
-    const cropSize = Math.min(v.videoWidth, v.videoHeight) * 0.70;
-    const sx = (v.videoWidth  - cropSize) / 2;
-    const sy = (v.videoHeight - cropSize) / 2;
+    // 1. Translate: center on wrist
+    const translated = landmarks.map(lm => ({
+      x: lm.x - wrist.x,
+      y: lm.y - wrist.y,
+      z: lm.z - wrist.z
+    }));
 
-    // Resize to exactly 224x224 to match model input shape
-    c.width  = 224;
-    c.height = 224;
-    const ctx = c.getContext("2d");
-    // Draw the cropped region scaled to 224x224
-    ctx.drawImage(v, sx, sy, cropSize, cropSize, 0, 0, 224, 224);
-    return c.toDataURL("image/jpeg", 0.92);
+    // 2. Flatten Z to 0 (matches Python training)
+    for (const lm of translated) lm.z = 0;
+
+    // 3. Scale: normalize by max distance from wrist (2D)
+    let maxDist = 0;
+    for (const lm of translated) {
+      const dist = Math.sqrt(lm.x * lm.x + lm.y * lm.y);
+      if (dist > maxDist) maxDist = dist;
+    }
+
+    // 4. Flatten to 63 floats
+    const features = [];
+    for (const lm of translated) {
+      if (maxDist > 0) {
+        features.push(lm.x / maxDist);
+        features.push(lm.y / maxDist);
+        features.push(0);
+      } else {
+        features.push(0, 0, 0);
+      }
+    }
+    return features;
   }, []);
 
+  // Hidden canvas used to flip the webcam frame before feeding to MediaPipe
+  const flipCanvasRef = useRef(null);
+
   const runInference = useCallback(async () => {
-    const frame = captureFrame();
-    if (!frame) return;
+    if (inferenceInFlightRef.current) return;
+    const v = videoRef.current;
+    if (!v || v.readyState < 2 || !landmarkerRef.current) return;
+
+    // The webcam is in selfie/mirror mode. The Kaggle dataset images are NOT mirrored.
+    // We must flip the frame horizontally before running landmark detection so
+    // the extracted coordinates match the non-mirrored training data.
+    let canvas = flipCanvasRef.current;
+    if (!canvas) {
+      canvas = document.createElement("canvas");
+      flipCanvasRef.current = canvas;
+    }
+    const vw = v.videoWidth || 640;
+    const vh = v.videoHeight || 480;
+    canvas.width = vw;
+    canvas.height = vh;
+    const ctx = canvas.getContext("2d");
+    ctx.translate(vw, 0);
+    ctx.scale(-1, 1);
+    ctx.drawImage(v, 0, 0, vw, vh);
+    ctx.setTransform(1, 0, 0, 1, 0, 0); // reset
+
+    // Run the Tasks Vision HandLandmarker on the FLIPPED frame
+    const result = landmarkerRef.current.detectForVideo(canvas, performance.now());
+
+    if (!result.landmarks || result.landmarks.length === 0) {
+      setIsHandPresent(false);
+      setCurrentSign(null);
+      lastSignRef.current = { label: null, count: 0 };
+      return;
+    }
+
+    setIsHandPresent(true);
+    const handLm = result.landmarks[0]; // array of {x, y, z}
+
+    inferenceInFlightRef.current = true;
+    const features = normalizeLandmarks(handLm);
+
     try {
-      const res  = await fetch(`${API}/predict/base64`, {
+      const res = await fetch(`${API}/predict/landmarks`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ image: frame, confidence_threshold: 0.62 })
+        body: JSON.stringify({ landmarks: features, confidence_threshold: confidenceThreshold / 100 })
       });
       if (!res.ok) return;
+
       const data = await res.json();
       setCurrentSign(data);
 
@@ -134,14 +231,19 @@ export default function ISLChatbot({ onBack }) {
         } else {
           lastSignRef.current = { label: data.label, count: 1 };
         }
+      } else {
+        lastSignRef.current = { label: null, count: 0 };
       }
     } catch { /* ignore network errors */ }
-  }, [captureFrame]);
+    finally {
+      inferenceInFlightRef.current = false;
+    }
+  }, [normalizeLandmarks]);
 
   const startRecognizing = useCallback(() => {
     if (intervalRef.current) clearInterval(intervalRef.current);
     setIsRecognizing(true);
-    intervalRef.current = setInterval(runInference, INFERENCE_MS);
+    intervalRef.current = setInterval(runInference, 300);
   }, [runInference]);
 
   const stopRecognizing = () => {
@@ -274,7 +376,6 @@ export default function ISLChatbot({ onBack }) {
   return (
     <div className="isl-chatbot">
       <audio ref={audioRef} style={{ display: "none" }} />
-      <canvas ref={canvasRef} style={{ display: "none" }} />
 
       {/* ── Header ────────────────────────────────────────────── */}
       <header className="chatbot-header">
@@ -323,12 +424,12 @@ export default function ISLChatbot({ onBack }) {
             />
             {isRecognizing && (
               <div className="scan-corners">
-                {/* ROI box — shows the 70% center crop being sent to the model */}
-                <div className="roi-box" />
                 <div className="sc tl" /><div className="sc tr" />
                 <div className="sc bl" /><div className="sc br" />
                 <div className="scan-bar" />
-                <div className="roi-hint">Place hand here</div>
+                <div className="roi-hint">
+                  {isHandPresent ? "Hand detected" : "Place hand in view"}
+                </div>
               </div>
             )}
           </div>
@@ -345,7 +446,7 @@ export default function ISLChatbot({ onBack }) {
                   className={`btn ${isRecognizing ? "btn-danger" : "btn-primary"}`}
                   onClick={isRecognizing ? stopRecognizing : startRecognizing}
                 >
-                  {isRecognizing ? "⏹ Stop" : "🎯 Start Signing"}
+                  {isRecognizing ? "⏹ Stop" : "🎯 start showing gesture"}
                 </button>
                 <button className="btn btn-ghost" onClick={stopCamera}>
                   ✕ Camera
@@ -487,10 +588,12 @@ export default function ISLChatbot({ onBack }) {
             <div ref={chatEndRef} />
           </div>
 
-          {/* ISL reference strip at bottom */}
+          {/* ISL reference & Settings strip at bottom */}
           <div className="gesture-ref">
-            <span className="ref-label">ISL Reference</span>
-            <div className="gesture-chips">
+            
+            <div className="ref-left">
+              <span className="ref-label">ISL Reference</span>
+              <div className="gesture-chips">
               {"ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("").map(l => (
                 <span
                   key={l}
@@ -508,6 +611,23 @@ export default function ISLChatbot({ onBack }) {
                 </span>
               ))}
             </div>
+            </div>
+
+            <div className="ref-right">
+              <div className="bottom-slider-wrap">
+                <span className="ref-label">Sensitivity ({confidenceThreshold}%)</span>
+                <input
+                  type="range"
+                  min="50"
+                  max="99"
+                  title={confidenceThreshold < 70 ? "More jittery" : confidenceThreshold > 90 ? "Requires perfect sign" : "Balanced"}
+                  value={confidenceThreshold}
+                  onChange={(e) => setConfidenceThreshold(Number(e.target.value))}
+                  className="conf-slider bottom-slider"
+                />
+              </div>
+            </div>
+
           </div>
         </div>
       </div>
