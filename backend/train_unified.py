@@ -1,6 +1,5 @@
 """
 train_unified.py — ISL Unified Training Script (Letters + Words)
-================================================================
 Trains a single, unified Dense classifier on BOTH static letter/number signs
 and the CSLTR word-level frames. Handles massive class imbalance via robust
 landmark data augmentation (synthetic rotation, scaling, jitter).
