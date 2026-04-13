@@ -1,8 +1,3 @@
-"""
-main.py — ISL Sign Language Chatbot Backend
-=============================================
-Clean, production-ready FastAPI backend with Cohere API.
-"""
 
 import io
 import os
