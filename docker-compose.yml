@@ -1,0 +1,29 @@
+version: '3.8'
+
+services:
+  backend:
+    build: ./backend
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    volumes:
+      - ./backend/model_v1:/app/model_v1:ro
+      - ./backend/labels.npy:/app/labels.npy:ro
+      - ./backend/training_config.json:/app/training_config.json:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "3000:80"
+    environment:
+      - VITE_API_URL=http://backend:8000  # Internal Docker network
+    depends_on:
+      backend:
+        condition: service_healthy
+

@@ -1,5 +1,6 @@
 {
-    "backbone": "mobilenetv2",
+    "model_type": "landmark_classifier",
+    "backbone": "dense_network",
     "num_classes": 35,
     "class_names": [
         "1",
@@ -76,12 +77,14 @@
         "Z": 34
     },
     "input_shape": [
-        224,
-        224,
-        3
+        63
     ],
-    "model_path": "/content/model_v1/model.keras",
+    "input_type": "landmarks",
+    "num_landmarks": 21,
+    "landmark_dimensions": 3,
+    "model_path": "C:\\Users\\yasin\\signbot\\backend\\landmark_model.keras",
     "confidence_threshold": 0.6,
-    "best_val_accuracy_phase1": 1.0,
-    "best_val_accuracy_phase2": 1.0
+    "best_train_accuracy": 0.999553382396698,
+    "best_val_accuracy": 0.9997618198394775,
+    "normalization": "wrist_centered_scale_normalized"
 }

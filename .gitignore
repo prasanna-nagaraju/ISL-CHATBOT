@@ -7,3 +7,7 @@ backend/__pycache__/
 frontend/node_modules/
 frontend/venv311/
 .env
+backend/venv311/
+frontend/dist/
+frontend/.npm_log.txt
+backend/model_v1/

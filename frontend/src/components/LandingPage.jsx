@@ -10,7 +10,7 @@ const FEATURES = [
   {
     icon: "🤖",
     title: "AI Chatbot",
-    desc: "Gemini Flash powered assistant that understands your signed input and responds intelligently in natural language."
+    desc: "Cohere powered assistant that understands your signed input and responds intelligently in natural language."
   },
   {
     icon: "🌐",
@@ -28,7 +28,7 @@ const STEPS = [
   { num: "01", title: "Open Camera", desc: "Allow webcam access and position your hand in front of the camera." },
   { num: "02", title: "Sign Gestures", desc: "Form ISL signs — letters and numbers are recognized in real time." },
   { num: "03", title: "Build Message", desc: "Signed letters build up into words. Press Send when ready." },
-  { num: "04", title: "Get AI Response", desc: "Gemini AI reads your signed message and replies instantly." },
+  { num: "04", title: "Get AI Response", desc: "Cohere AI reads your signed message and replies instantly." },
 ];
 
 export default function LandingPage({ onGetStarted }) {
@@ -92,7 +92,7 @@ export default function LandingPage({ onGetStarted }) {
       </section>
 
       <footer className="landing-footer">
-        Built with MobileNetV2 · Gemini Flash · FastAPI · React
+        Built with MobileNetV2 · Cohere · FastAPI · React
       </footer>
     </div>
   );
