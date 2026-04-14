@@ -293,7 +293,7 @@ export default function ISLChatbot({ onBack }) {
     } catch (e) {
       setMessages(prev => [...prev, {
         role: "model",
-        content: `⚠️ Error: ${e.message}. Make sure GEMINI_API_KEY is set in your .env file.`,
+        content: `⚠️ Error: ${e.message}. Make sure COHERE_API_KEY is set in your .env file.`,
         timestamp: Date.now(),
         isError: true
       }]);
