@@ -258,37 +258,6 @@ SOFTWARE.
 
 ---
 
-## 📞 Contact & Support
-
-- **GitHub Repository**: [Your GitHub Repo Link]
-- **Issue Tracker**: [GitHub Issues Link]
-- **Documentation**: [Project Wiki Link]
-- **Email Support**: support@multilingual-chatbot.com
-
----
-
-## 📚 References
-
-1. Cohere Documentation - Official API documentation
-2. IndicTrans2 Research Paper - arXiv:2205.12634
-3. pyttsx3 Documentation - Official library documentation
-4. Flask Documentation - Web framework documentation
-
-
----
-
-## 🔒 Environment Variables
-
-Create a .env file with the following structure:
-COHERE_API_KEY=your_cohere_api_key_here
-FLASK_ENV=development
-SECRET_KEY=your_secret_key_here
-DEBUG=True
-PORT=5000
-
-
----
-
 ## 🌐 Supported Languages
 
 | Language | Code | Script |
